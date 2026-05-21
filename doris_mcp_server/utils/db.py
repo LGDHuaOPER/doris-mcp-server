@@ -24,6 +24,7 @@ Supports asynchronous operations and concurrent connection management, ensuring 
 
 import asyncio
 import logging
+import re
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -36,6 +37,22 @@ from aiomysql import Connection, Pool
 from .logger import get_logger
 
 
+_SQL_COMMENT_RE = re.compile(r"/\*.*?\*/|--[^\n]*", re.DOTALL)
+
+
+def get_first_sql_keyword(sql: str) -> str:
+    """Return the first SQL keyword (uppercase), ignoring leading comments/whitespace.
+
+    Strips `--` line comments and `/* */` block comments before extracting
+    the first token. A leading comment must not change how a statement is
+    classified (e.g. `-- note\\nSELECT 1` is still a SELECT).
+    """
+    if not sql:
+        return ""
+    stripped = _SQL_COMMENT_RE.sub("", sql).strip()
+    if not stripped:
+        return ""
+    return stripped.split(None, 1)[0].upper()
 
 
 @dataclass
@@ -95,15 +112,9 @@ class DorisConnection:
             async with self.connection.cursor(aiomysql.DictCursor) as cursor:
                 await cursor.execute(sql, params)
 
-                # Check if it's a query statement (statement that returns result set)
-                # FIX for Issue #62 Bug 5: Added WITH support for Common Table Expressions (CTE)
-                sql_upper = sql.strip().upper()
-                if (sql_upper.startswith("SELECT") or
-                    sql_upper.startswith("SHOW") or
-                    sql_upper.startswith("DESCRIBE") or
-                    sql_upper.startswith("DESC") or
-                    sql_upper.startswith("EXPLAIN") or
-                    sql_upper.startswith("WITH")):  # FIX: Support CTE queries
+                # cursor.description is set by the DB driver for any statement that returns rows,
+                # avoiding a brittle hardcoded keyword list (e.g. missing WITH/CTE, comments before keywords).
+                if cursor.description:
                     data = await cursor.fetchall()
                     row_count = len(data)
                 else:
